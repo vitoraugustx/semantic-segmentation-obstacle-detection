@@ -4,3 +4,4 @@ datasets/
 *.ply
 __pycache__/
 *.pyc
+*.venv
