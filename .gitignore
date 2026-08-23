@@ -1,0 +1,6 @@
+*.vscode
+*.conda
+datasets/
+*.ply
+__pycache__/
+*.pyc
