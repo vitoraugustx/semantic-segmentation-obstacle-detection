@@ -7,8 +7,10 @@ import torch
 import torch.nn.functional as F
 from mmcv.parallel import collate, scatter
 from mmcv.runner import load_checkpoint
-from mmseg.apis import init_segmentor
-from mmseg.datasets.pipelines import Compose, LoadImage
+from mmseg.apis import inference_segmentor, init_segmentor
+from mmseg.datasets.pipelines import Compose
+from mmseg.apis.inference import LoadImage
+
 from PIL import Image
 import dinov2.eval.segmentation_m2f.models
 
@@ -48,16 +50,21 @@ def export_segmentation_prediction(
 
     model.eval()
     with torch.no_grad():
-        # This is the original mmseg inference path and is authoritative for IDs.
-        result = model(return_loss=False, rescale=True, **data)
+        decode_outputs = {}
+
+        def capture_decode_outputs(module, inputs, outputs):
+            decode_outputs["value"] = outputs
+
+        hook = model.decode_head.register_forward_hook(capture_decode_outputs)
+        try:
+            result = inference_segmentor(model, image_bgr)
+        finally:
+            hook.remove()
+
         class_ids_array = np.asarray(result[0], dtype=np.uint8) + 1
 
-        # The original API does not expose probabilities, so derive them from the
-        # same batch only after obtaining the authoritative segmentation result.
+        all_cls_scores, all_mask_preds = decode_outputs["value"]
         img_tensor = data["img"][0]
-        img_metas = data["img_metas"]
-        features = model.extract_feat(img_tensor)
-        all_cls_scores, all_mask_preds = model.decode_head(features, img_metas)
         class_scores = F.softmax(all_cls_scores[-1], dim=-1)[:, :, :150]
         mask_scores = F.interpolate(
             all_mask_preds[-1],
@@ -81,7 +88,7 @@ def export_segmentation_prediction(
             probabilities.sum(dim=1, keepdim=True) + 1e-8
         )
         confidence_array = (
-            probabilities.max(dim=1).values.squeeze(0).cpu().numpy().astype(np.float16)
+            probabilities.max(dim=1).values.squeeze(0).cpu().numpy().astype(np.float32)
         )
 
     archive = {
@@ -90,7 +97,7 @@ def export_segmentation_prediction(
     }
     if include_probabilities:
         archive["probabilities"] = (
-            probabilities.squeeze(0).cpu().numpy().astype(np.float16)
+            probabilities.squeeze(0).cpu().numpy().astype(np.float32)
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
