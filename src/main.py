@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,22 +19,21 @@ class SemanticClass:
 
 def load_classes(path: Path) -> list[SemanticClass]:
     classes: list[SemanticClass] = []
-    color_pattern = re.compile(r"\((\d+),\s*(\d+),\s*(\d+)\)")
 
     for line in path.read_text(encoding="utf-8").splitlines():
         columns = [column.strip() for column in line.split("|")]
         if len(columns) < 10 or not columns[1].isdigit():
             continue
 
-        color_match = color_pattern.fullmatch(columns[6])
-        if color_match is None:
+        color_values = columns[6].strip("()").split(",")
+        if len(color_values) != 3 or not all(value.strip().isdigit() for value in color_values):
             continue
 
         classes.append(
             SemanticClass(
                 index=int(columns[1]),
                 name=columns[8].split(";")[0],
-                color=tuple(map(int, color_match.groups())),
+                color=tuple(int(value.strip()) for value in color_values),
             )
         )
 
@@ -44,33 +42,26 @@ def load_classes(path: Path) -> list[SemanticClass]:
     return classes
 
 
-def rgb_to_class_ids(
-    image: np.ndarray, classes: list[SemanticClass], color_tolerance: float
-) -> np.ndarray:
-    colors = np.array(
-        [semantic_class.color for semantic_class in classes], dtype=np.int16
-    )
-    class_indices = np.array(
-        [semantic_class.index for semantic_class in classes], dtype=np.int32
-    )
-    flat_image = image.reshape(-1, 3)
-    unique_colors, inverse = np.unique(flat_image, axis=0, return_inverse=True)
-    distances = np.sum(
-        (
-            unique_colors[:, np.newaxis, :].astype(np.int32)
-            - colors[np.newaxis, :, :].astype(np.int32)
+def load_class_ids(path: Path) -> np.ndarray:
+    with np.load(path, allow_pickle=False) as archive:
+        if "class_ids" not in archive.files:
+            raise ValueError(f"The 'class_ids' key was not found in {path}.")
+        class_ids = np.asarray(archive["class_ids"])
+
+    if class_ids.ndim != 2:
+        raise ValueError(
+            f"The 'class_ids' key must contain a 2D array; received shape: {class_ids.shape}."
         )
-        ** 2,
-        axis=2,
-        dtype=np.int32,
-    )
-    nearest_positions = np.argmin(distances, axis=1)
-    nearest_distances = np.sqrt(
-        distances[np.arange(len(unique_colors)), nearest_positions]
-    )
-    unique_class_ids = class_indices[nearest_positions]
-    unique_class_ids[nearest_distances > color_tolerance] = -1
-    return unique_class_ids[inverse].reshape(image.shape[:2])
+    return class_ids
+
+
+def class_ids_to_semantic_image(
+    class_ids: np.ndarray, classes: list[SemanticClass]
+) -> Image.Image:
+    semantic_image = np.zeros((*class_ids.shape, 3), dtype=np.uint8)
+    for semantic_class in classes:
+        semantic_image[class_ids == semantic_class.index] = semantic_class.color
+    return Image.fromarray(semantic_image, mode="RGB")
 
 
 def keep_main_road(road_mask: np.ndarray) -> np.ndarray:
@@ -157,20 +148,31 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=project_root / "data" / "05_Schafgasse.jpg",
-        help="RGB image with the color-coded semantic mask.",
+        default=project_root / "data" / "segmentation_prediction.npz",
+        help="NPZ file containing the class IDs under the 'class_ids' key.",
     )
     parser.add_argument(
         "--classes",
         type=Path,
-        default=project_root / "src" / "classes.md",
+        default=project_root / "src" / "ade20k_classes.md",
         help="ADE20K class table.",
+    )
+    parser.add_argument(
+        "--image",
+        type=Path,
+        default=project_root / "data" / "05_Schafgasse.png",
+        help="Reference image used to generate full-resolution visual outputs.",
     )
     parser.add_argument("--output-dir", type=Path, default=project_root / "output")
     parser.add_argument("--road-index", type=int, default=7)
-    parser.add_argument("--min-area", type=int, default=100)
+    parser.add_argument("--min-area", type=int, default=200)
     parser.add_argument("--max-area", type=int, default=50_000)
-    parser.add_argument("--color-tolerance", type=float, default=40.0)
+    parser.add_argument(
+        "--color-tolerance",
+        type=float,
+        default=40.0,
+        help="Retained for CLI compatibility; ignored for NPZ class IDs.",
+    )
     return parser.parse_args()
 
 
@@ -186,18 +188,23 @@ def main() -> None:
     if arguments.road_index not in class_by_index:
         raise ValueError(f"Road class {arguments.road_index} was not found.")
 
-    input_image = Image.open(arguments.input).convert("RGB")
-    image_array = np.asarray(input_image)
-    class_ids = rgb_to_class_ids(image_array, classes, arguments.color_tolerance)
+    class_ids = load_class_ids(arguments.input)
     road_mask = keep_main_road(class_ids == arguments.road_index)
     road_pixels = int(np.count_nonzero(road_mask))
     if road_pixels == 0:
-        raise ValueError("No road pixels were found in the image.")
+        raise ValueError("No road pixels were found in the class ID matrix.")
 
     obstacle_mask, components = extract_obstacles(
         class_ids, arguments.road_index, arguments.min_area, arguments.max_area
     )
     obstacles = describe_components(components, class_ids, class_by_index)
+    reference_image = Image.open(arguments.image).convert("RGB")
+    if reference_image.size != (class_ids.shape[1], class_ids.shape[0]):
+        raise ValueError(
+            "The class ID matrix and reference image must have the same resolution: "
+            f"class_ids={class_ids.shape[1]}x{class_ids.shape[0]}, "
+            f"image={reference_image.width}x{reference_image.height}."
+        )
 
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(road_mask.astype(np.uint8) * 255, mode="L").save(
@@ -206,7 +213,14 @@ def main() -> None:
     Image.fromarray(obstacle_mask.astype(np.uint8) * 255, mode="L").save(
         arguments.output_dir / "obstacle_mask.png"
     )
-    save_overlay(input_image, obstacles, arguments.output_dir / "obstacles_overlay.jpg")
+    class_ids_to_semantic_image(class_ids, classes).save(
+        arguments.output_dir / "semantic_segmentation.png"
+    )
+    save_overlay(
+        reference_image,
+        obstacles,
+        arguments.output_dir / "obstacles_overlay.jpg",
+    )
     report = {
         "input": str(arguments.input),
         "road_class": class_by_index[arguments.road_index].name,

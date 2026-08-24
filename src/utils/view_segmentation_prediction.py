@@ -28,25 +28,20 @@ def show_prediction_sample(input_path: Path, rows: int, columns: int) -> None:
         raise ValueError("--rows and --columns must be greater than zero.")
 
     with np.load(input_path, allow_pickle=False) as archive:
-        required_fields = {"class_ids", "confidence"}
-        missing_fields = required_fields.difference(archive.files)
-        if missing_fields:
-            missing = ", ".join(sorted(missing_fields))
-            raise ValueError(f"Missing required fields: {missing}")
+        if "class_ids" not in archive.files:
+            raise ValueError("The 'class_ids' key was not found in the archive.")
 
         class_ids = archive["class_ids"]
-        confidence = archive["confidence"]
+        confidence = archive["confidence"] if "confidence" in archive.files else None
         probabilities = archive.get("probabilities")
         sample_rows = min(rows, class_ids.shape[0])
         sample_columns = min(columns, class_ids.shape[1])
 
         print(f"File: {input_path}")
-        displayed_fields = "class_ids, confidence"
-        if probabilities is not None:
-            displayed_fields += ", probabilities"
-        print(f"Displayed fields: {displayed_fields}")
+        print(f"Fields: {', '.join(archive.files)}")
         print(f"class_ids: shape={class_ids.shape}, dtype={class_ids.dtype}")
-        print(f"confidence: shape={confidence.shape}, dtype={confidence.dtype}")
+        if confidence is not None:
+            print(f"confidence: shape={confidence.shape}, dtype={confidence.dtype}")
         if probabilities is not None:
             print(
                 f"probabilities: shape={probabilities.shape}, "
@@ -54,8 +49,9 @@ def show_prediction_sample(input_path: Path, rows: int, columns: int) -> None:
             )
         print(f"\nSample ({sample_rows}x{sample_columns}) of class_ids:")
         print(class_ids[:sample_rows, :sample_columns])
-        print(f"\nSample ({sample_rows}x{sample_columns}) of confidence:")
-        print(confidence[:sample_rows, :sample_columns])
+        if confidence is not None:
+            print(f"\nSample ({sample_rows}x{sample_columns}) of confidence:")
+            print(confidence[:sample_rows, :sample_columns])
         if probabilities is not None:
             print(f"\nSample ({sample_rows}x{sample_columns}) of probabilities:")
             print(probabilities[:sample_rows, :sample_columns])
