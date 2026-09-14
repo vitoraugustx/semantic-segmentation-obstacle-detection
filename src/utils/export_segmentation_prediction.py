@@ -5,6 +5,7 @@ from pathlib import Path
 import mmcv
 import numpy as np
 import torch
+from tqdm import tqdm
 from mmcv.runner import load_checkpoint
 from mmseg.apis import init_segmentor, inference_segmentor
 
@@ -44,7 +45,6 @@ def export_segmentation_prediction(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output_path, **archive)
-    print(f"Prediction saved to: {output_path}")
     return segmentation_logits
 
 
@@ -93,7 +93,11 @@ def main() -> None:
     model.cuda()
     model.eval()
 
-    for image_path, output_path in zip(image_paths, output_paths):
+    for image_path, output_path in tqdm(
+        zip(image_paths, output_paths),
+        total=len(image_paths),
+        desc="Exporting predictions",
+    ):
         export_segmentation_prediction(
             model=model,
             image_path=str(image_path),
