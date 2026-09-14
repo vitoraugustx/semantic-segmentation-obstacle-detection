@@ -154,7 +154,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--classes",
         type=Path,
-        default=project_root / "src" / "ade20k_classes.md",
+        default=project_root / "docs" / "ade20k_classes.md",
         help="ADE20K class table.",
     )
     parser.add_argument(
