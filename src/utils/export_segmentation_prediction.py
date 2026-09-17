@@ -88,6 +88,10 @@ def main() -> None:
 
     cfg_str = load_config_from_url(CONFIG_URL)
     cfg = mmcv.Config.fromstring(cfg_str, file_format=".py")
+
+    # Change the image scale to 1920x1080 to input the model; default is 2048x512
+    # cfg.data.test.pipeline[1].img_scale = (1920, 1080)
+
     model = init_segmentor(cfg)
     load_checkpoint(model, CHECKPOINT_URL, map_location="cpu")
     model.cuda()

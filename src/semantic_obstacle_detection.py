@@ -44,9 +44,9 @@ def load_classes(path: Path) -> list[SemanticClass]:
 
 def load_class_ids(path: Path) -> np.ndarray:
     with np.load(path, allow_pickle=False) as archive:
-        if "class_ids" not in archive.files:
-            raise ValueError(f"The 'class_ids' key was not found in {path}.")
-        class_ids = np.asarray(archive["class_ids"])
+        if "class_idx" not in archive.files:
+            raise ValueError(f"The 'class_idx' key was not found in {path}.")
+        class_ids = np.asarray(archive["class_idx"])
 
     if class_ids.ndim != 2:
         raise ValueError(
@@ -160,7 +160,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--image",
         type=Path,
-        default=project_root / "data" / "05_Schafgasse.png",
+        default=project_root / "data" / "validation_1.jpg",
         help="Reference image used to generate full-resolution visual outputs.",
     )
     parser.add_argument("--output-dir", type=Path, default=project_root / "output")
