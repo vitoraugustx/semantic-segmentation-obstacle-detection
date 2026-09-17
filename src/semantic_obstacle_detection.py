@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
 
@@ -64,10 +64,53 @@ def class_ids_to_semantic_image(
     return Image.fromarray(semantic_image, mode="RGB")
 
 
+def save_labeled_semantic_segmentation(
+    image: Image.Image,
+    class_ids: np.ndarray,
+    classes: list[SemanticClass],
+    output: Path,
+) -> None:
+    semantic_image = class_ids_to_semantic_image(class_ids, classes)
+    labeled_image = Image.blend(image.convert("RGB"), semantic_image, alpha=0.5)
+    label_layer = Image.new("RGBA", labeled_image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(label_layer)
+    font = ImageFont.load_default(size=22)
+
+    for semantic_class in classes:
+        rows, columns = np.where(class_ids == semantic_class.index)
+        if not rows.size:
+            continue
+
+        label = semantic_class.name
+        label_x = int(np.median(columns))
+        label_y = int(np.median(rows))
+        left, top, right, bottom = draw.textbbox(
+            (label_x, label_y), label, font=font
+        )
+        draw.rectangle(
+            (left - 8, top - 4, right + 8, bottom + 4), fill=(0, 0, 0, 180)
+        )
+        draw.text(
+            (label_x, label_y), label, font=font, fill=(255, 255, 255, 255)
+        )
+
+    labeled_image = Image.alpha_composite(labeled_image.convert("RGBA"), label_layer)
+    labeled_image.convert("RGB").save(output)
+
+
 def keep_main_road(road_mask: np.ndarray) -> np.ndarray:
     """Remove thin lines while preserving disconnected, wider road regions."""
     structure = np.ones((3, 3), dtype=bool)
     return ndimage.binary_opening(road_mask, structure=structure)
+
+
+def create_road_obstacle_mask(
+    road_mask: np.ndarray, obstacle_mask: np.ndarray
+) -> Image.Image:
+    combined_mask = np.zeros((*road_mask.shape, 3), dtype=np.uint8)
+    combined_mask[road_mask] = (255, 255, 255)
+    combined_mask[obstacle_mask] = (255, 102, 0)
+    return Image.fromarray(combined_mask, mode="RGB")
 
 
 def extract_obstacles(
@@ -98,7 +141,6 @@ def describe_components(
     descriptions: list[dict[str, int | str | list[int]]] = []
 
     for component_id, component in components:
-        rows, columns = np.where(component)
         component_class_ids = class_ids[component]
         valid_class_ids = component_class_ids[component_class_ids >= 0]
         if valid_class_ids.size:
@@ -115,29 +157,9 @@ def describe_components(
                 "class_id": dominant_class_id,
                 "class_name": class_name,
                 "area_pixels": int(component.sum()),
-                "bbox_xyxy": [
-                    int(columns.min()),
-                    int(rows.min()),
-                    int(columns.max()),
-                    int(rows.max()),
-                ],
             }
         )
     return descriptions
-
-
-def save_overlay(
-    image: Image.Image, obstacles: list[dict[str, int | str | list[int]]], output: Path
-) -> None:
-    overlay = image.convert("RGBA")
-    draw = ImageDraw.Draw(overlay)
-    for obstacle in obstacles:
-        left, top, right, bottom = obstacle["bbox_xyxy"]
-        draw.rectangle((left, top, right, bottom), outline=(255, 0, 0, 255), width=4)
-        draw.text(
-            (left, max(0, top - 16)), str(obstacle["class_name"]), fill=(255, 0, 0, 255)
-        )
-    overlay.convert("RGB").save(output)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -148,7 +170,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=project_root / "data" / "segmentation_prediction.npz",
+        default=project_root / "data" / "datasets" / "RoadObstacle21" / "Mask2Former_DINOv2_inferences" / "validation_3.npz",
         help="NPZ file containing the class IDs under the 'class_ids' key.",
     )
     parser.add_argument(
@@ -160,7 +182,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--image",
         type=Path,
-        default=project_root / "data" / "validation_1.jpg",
+        default=project_root / "data" / "validation_3.jpg",
         help="Reference image used to generate full-resolution visual outputs.",
     )
     parser.add_argument("--output-dir", type=Path, default=project_root / "output")
@@ -201,19 +223,14 @@ def main() -> None:
         )
 
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(road_mask.astype(np.uint8) * 255, mode="L").save(
-        arguments.output_dir / "road_mask.png"
+    create_road_obstacle_mask(road_mask, obstacle_mask).save(
+        arguments.output_dir / "road_obstacle_mask.png"
     )
-    Image.fromarray(obstacle_mask.astype(np.uint8) * 255, mode="L").save(
-        arguments.output_dir / "obstacle_mask.png"
-    )
-    class_ids_to_semantic_image(class_ids, classes).save(
-        arguments.output_dir / "semantic_segmentation.png"
-    )
-    save_overlay(
+    save_labeled_semantic_segmentation(
         reference_image,
-        obstacles,
-        arguments.output_dir / "obstacles_overlay.jpg",
+        class_ids,
+        classes,
+        arguments.output_dir / "semantic_segmentation_labeled.png",
     )
     report = {
         "input": str(arguments.input),

@@ -1,0 +1,14 @@
+{
+  "input": "C:\\Users\\Vitor\\Codes\\semantic-segmentation-obstacle-detection\\data\\datasets\\RoadObstacle21\\Mask2Former_DINOv2_inferences\\validation_3.npz",
+  "road_class": "road",
+  "road_pixels": 813384,
+  "obstacle_count": 1,
+  "obstacles": [
+    {
+      "component_id": 1,
+      "class_id": 109,
+      "class_name": "plaything",
+      "area_pixels": 4076
+    }
+  ]
+}
