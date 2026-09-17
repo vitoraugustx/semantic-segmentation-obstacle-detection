@@ -168,10 +168,10 @@ def parse_arguments() -> argparse.Namespace:
         description="Extracts objects inside the region segmented as road."
     )
     parser.add_argument(
-        "--input",
+        "--input-dir",
         type=Path,
-        default=project_root / "data" / "datasets" / "RoadObstacle21" / "Mask2Former_DINOv2_inferences" / "validation_3.npz",
-        help="NPZ file containing the class IDs under the 'class_ids' key.",
+        default=project_root / "data" / "datasets" / "RoadObstacle21" / "Mask2Former_DINOv2_inferences",
+        help="Directory containing NPZ files with class IDs under the 'class_idx' key.",
     )
     parser.add_argument(
         "--classes",
@@ -180,16 +180,73 @@ def parse_arguments() -> argparse.Namespace:
         help="ADE20K class table.",
     )
     parser.add_argument(
-        "--image",
+        "--image-dir",
         type=Path,
-        default=project_root / "data" / "validation_3.jpg",
-        help="Reference image used to generate full-resolution visual outputs.",
+        default=project_root / "data" / "datasets" / "RoadObstacle21" / "rgb",
+        help="Directory containing the RGB image corresponding to each NPZ stem.",
     )
     parser.add_argument("--output-dir", type=Path, default=project_root / "output")
     parser.add_argument("--road-index", type=int, default=7)
     parser.add_argument("--min-area", type=int, default=200)
     parser.add_argument("--max-area", type=int, default=50_000)
     return parser.parse_args()
+
+
+def process_prediction(
+    input_path: Path,
+    image_path: Path,
+    output_dir: Path,
+    arguments: argparse.Namespace,
+    classes: list[SemanticClass],
+    class_by_index: dict[int, SemanticClass],
+) -> int:
+    class_ids = load_class_ids(input_path)
+    road_mask = keep_main_road(class_ids == arguments.road_index)
+    road_pixels = int(np.count_nonzero(road_mask))
+    if road_pixels == 0:
+        raise ValueError(f"No road pixels were found in {input_path}.")
+
+    obstacle_mask, components = extract_obstacles(
+        class_ids, arguments.road_index, arguments.min_area, arguments.max_area
+    )
+    obstacles = describe_components(components, class_ids, class_by_index)
+    reference_image = Image.open(image_path).convert("RGB")
+    if reference_image.size != (class_ids.shape[1], class_ids.shape[0]):
+        raise ValueError(
+            "The class ID matrix and reference image must have the same resolution: "
+            f"class_ids={class_ids.shape[1]}x{class_ids.shape[0]}, "
+            f"image={reference_image.width}x{reference_image.height}."
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    create_road_obstacle_mask(road_mask, obstacle_mask).save(
+        output_dir / "road_obstacle_mask.png"
+    )
+    save_labeled_semantic_segmentation(
+        reference_image,
+        class_ids,
+        classes,
+        output_dir / "semantic_segmentation_labeled.png",
+    )
+    report = {
+        "input": str(input_path),
+        "image": str(image_path),
+        "road_class": class_by_index[arguments.road_index].name,
+        "road_pixels": road_pixels,
+        "obstacle_count": len(obstacles),
+        "obstacles": obstacles,
+    }
+    (output_dir / "obstacles.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    print(f"{input_path.name}: road={road_pixels} pixels, obstacles={len(obstacles)}")
+    for obstacle in obstacles:
+        print(
+            f"- {obstacle['class_name']} (id={obstacle['class_id']}, "
+            f"area={obstacle['area_pixels']} px)"
+        )
+    return len(obstacles)
 
 
 def main() -> None:
@@ -204,52 +261,37 @@ def main() -> None:
     if arguments.road_index not in class_by_index:
         raise ValueError(f"Road class {arguments.road_index} was not found.")
 
-    class_ids = load_class_ids(arguments.input)
-    road_mask = keep_main_road(class_ids == arguments.road_index)
-    road_pixels = int(np.count_nonzero(road_mask))
-    if road_pixels == 0:
-        raise ValueError("No road pixels were found in the class ID matrix.")
+    input_paths = sorted(arguments.input_dir.glob("*.npz"))
+    if not input_paths:
+        raise ValueError(f"No NPZ files were found in {arguments.input_dir}.")
 
-    obstacle_mask, components = extract_obstacles(
-        class_ids, arguments.road_index, arguments.min_area, arguments.max_area
-    )
-    obstacles = describe_components(components, class_ids, class_by_index)
-    reference_image = Image.open(arguments.image).convert("RGB")
-    if reference_image.size != (class_ids.shape[1], class_ids.shape[0]):
-        raise ValueError(
-            "The class ID matrix and reference image must have the same resolution: "
-            f"class_ids={class_ids.shape[1]}x{class_ids.shape[0]}, "
-            f"image={reference_image.width}x{reference_image.height}."
+    image_extensions = (".jpg", ".jpeg", ".png")
+    total_obstacles = 0
+    for input_path in input_paths:
+        image_path = next(
+            (
+                arguments.image_dir / f"{input_path.stem}{extension}"
+                for extension in image_extensions
+                if (arguments.image_dir / f"{input_path.stem}{extension}").is_file()
+            ),
+            None,
+        )
+        if image_path is None:
+            raise FileNotFoundError(
+                f"No RGB image found for {input_path.name} in {arguments.image_dir}."
+            )
+
+        total_obstacles += process_prediction(
+            input_path,
+            image_path,
+            arguments.output_dir / input_path.stem,
+            arguments,
+            classes,
+            class_by_index,
         )
 
-    arguments.output_dir.mkdir(parents=True, exist_ok=True)
-    create_road_obstacle_mask(road_mask, obstacle_mask).save(
-        arguments.output_dir / "road_obstacle_mask.png"
-    )
-    save_labeled_semantic_segmentation(
-        reference_image,
-        class_ids,
-        classes,
-        arguments.output_dir / "semantic_segmentation_labeled.png",
-    )
-    report = {
-        "input": str(arguments.input),
-        "road_class": class_by_index[arguments.road_index].name,
-        "road_pixels": road_pixels,
-        "obstacle_count": len(obstacles),
-        "obstacles": obstacles,
-    }
-    (arguments.output_dir / "obstacles.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    print(f"Road: {road_pixels} pixels")
-    print(f"Detected obstacles: {len(obstacles)}")
-    for obstacle in obstacles:
-        print(
-            f"- {obstacle['class_name']} (id={obstacle['class_id']}, "
-            f"area={obstacle['area_pixels']} px)"
-        )
+    print(f"Processed files: {len(input_paths)}")
+    print(f"Detected obstacles: {total_obstacles}")
 
 
 if __name__ == "__main__":

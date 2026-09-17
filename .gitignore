@@ -5,3 +5,4 @@ datasets/
 __pycache__/
 *.pyc
 *.venv
+output/validation*
