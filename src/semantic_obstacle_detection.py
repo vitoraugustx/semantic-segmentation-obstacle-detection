@@ -167,12 +167,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--road-index", type=int, default=7)
     parser.add_argument("--min-area", type=int, default=200)
     parser.add_argument("--max-area", type=int, default=50_000)
-    parser.add_argument(
-        "--color-tolerance",
-        type=float,
-        default=40.0,
-        help="Retained for CLI compatibility; ignored for NPZ class IDs.",
-    )
     return parser.parse_args()
 
 
