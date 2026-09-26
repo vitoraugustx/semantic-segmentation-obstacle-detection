@@ -24,3 +24,12 @@ np.savez_compressed(
     confidence=confidence.astype(np.float16),
 )
 ```
+
+## Segmentation script CLI
+
+```text
+--input-dir PATH      Directory containing NPZ files with the class_idx array
+--classes PATH        ADE20K class table
+--image-dir PATH      Directory containing matching RGB images
+--output-dir PATH     Directory for generated outputs, grouped by input stem
+```
