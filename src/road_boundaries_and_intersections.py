@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+try:
+    from scipy import ndimage  # pyright: ignore[reportMissingImports]
+except ImportError:
+    ndimage = None
 
 try:
     from .utils import config
@@ -49,6 +55,63 @@ def load_road_mask(path: Path, road_index: int) -> np.ndarray:
     return road_mask
 
 
+def connected_components(mask: np.ndarray) -> Iterator[np.ndarray]:
+    unvisited = mask.copy()
+    coordinates = zip(*np.nonzero(mask))
+    height, width = mask.shape
+
+    for start_row, start_column in coordinates:
+        if not unvisited[start_row, start_column]:
+            continue
+        stack = [(int(start_row), int(start_column))]
+        unvisited[start_row, start_column] = False
+        component_pixels: list[tuple[int, int]] = []
+
+        while stack:
+            row, column = stack.pop()
+            component_pixels.append((row, column))
+            for row_offset in (-1, 0, 1):
+                for column_offset in (-1, 0, 1):
+                    if row_offset == 0 and column_offset == 0:
+                        continue
+                    neighbor_row = row + row_offset
+                    neighbor_column = column + column_offset
+                    if not (
+                        0 <= neighbor_row < height and 0 <= neighbor_column < width
+                    ):
+                        continue
+                    if unvisited[neighbor_row, neighbor_column]:
+                        unvisited[neighbor_row, neighbor_column] = False
+                        stack.append((neighbor_row, neighbor_column))
+
+        component_mask = np.zeros_like(mask, dtype=bool)
+        component_rows, component_columns = zip(*component_pixels)
+        component_mask[component_rows, component_columns] = True
+        yield component_mask
+
+
+def keep_largest_component(mask: np.ndarray) -> np.ndarray:
+    if ndimage is not None:
+        labeled_components, component_count = ndimage.label(
+            mask, structure=np.ones((3, 3), dtype=np.uint8)
+        )
+        if component_count == 0:
+            return mask
+        component_sizes = np.bincount(
+            labeled_components.ravel(), minlength=component_count + 1
+        )
+        largest_component_id = int(np.argmax(component_sizes[1:]) + 1)
+        return labeled_components == largest_component_id
+
+    components = connected_components(mask)
+    largest_component = max(components, key=np.count_nonzero, default=None)
+    return (
+        np.zeros_like(mask, dtype=bool)
+        if largest_component is None
+        else largest_component
+    )
+
+
 def select_intersecting_classes(
     class_ids: np.ndarray,
     region_mask: np.ndarray,
@@ -57,23 +120,62 @@ def select_intersecting_classes(
 ) -> tuple[dict[int, np.ndarray], list[dict[str, float | int]]]:
     selected_masks: dict[int, np.ndarray] = {}
     statistics: list[dict[str, float | int]] = []
-    for class_id in np.unique(class_ids):
+    candidate_class_ids = np.unique(class_ids[region_mask])
+    for class_id in candidate_class_ids:
         class_id = int(class_id)
         if class_id == road_index:
             continue
         class_mask = class_ids == class_id
-        class_pixels = int(class_mask.sum())
-        intersection_pixels = int(np.count_nonzero(class_mask & region_mask))
-        intersection_percent = 100.0 * intersection_pixels / class_pixels
-        if intersection_pixels and intersection_percent >= threshold:
-            selected_masks[class_id] = class_mask & region_mask
-            statistics.append(
-                {
-                    "class_id": class_id,
-                    "class_pixels": class_pixels,
-                    "intersection_pixels": intersection_pixels,
-                    "intersection_percent": intersection_percent,
-                }
+        if ndimage is None:
+            components = connected_components(class_mask)
+            for component_id, component_mask in enumerate(components, start=1):
+                class_pixels = int(component_mask.sum())
+                intersection_pixels = int(
+                    np.count_nonzero(component_mask & region_mask)
+                )
+                intersection_percent = 100.0 * intersection_pixels / class_pixels
+                if intersection_pixels and intersection_percent >= threshold:
+                    if class_id not in selected_masks:
+                        selected_masks[class_id] = np.zeros_like(class_mask, dtype=bool)
+                    selected_masks[class_id] |= component_mask
+                    statistics.append(
+                        {
+                            "class_id": class_id,
+                            "component_id": component_id,
+                            "class_pixels": class_pixels,
+                            "intersection_pixels": intersection_pixels,
+                            "intersection_percent": intersection_percent,
+                        }
+                    )
+            continue
+        labeled_components, component_count = ndimage.label(
+            class_mask, structure=np.ones((3, 3), dtype=np.uint8)
+        )
+        component_sizes = np.bincount(
+            labeled_components.ravel(), minlength=component_count + 1
+        )
+        intersection_sizes = np.bincount(
+            labeled_components[region_mask], minlength=component_count + 1
+        )
+        selected_component_ids: list[int] = []
+        for component_id in range(1, component_count + 1):
+            class_pixels = int(component_sizes[component_id])
+            intersection_pixels = int(intersection_sizes[component_id])
+            intersection_percent = 100.0 * intersection_pixels / class_pixels
+            if intersection_pixels and intersection_percent >= threshold:
+                selected_component_ids.append(component_id)
+                statistics.append(
+                    {
+                        "class_id": class_id,
+                        "component_id": component_id,
+                        "class_pixels": class_pixels,
+                        "intersection_pixels": intersection_pixels,
+                        "intersection_percent": intersection_percent,
+                    }
+                )
+        if selected_component_ids:
+            selected_masks[class_id] = np.isin(
+                labeled_components, selected_component_ids
             )
     return selected_masks, statistics
 
@@ -164,6 +266,17 @@ def make_curved_region(
     return region_mask, left_boundary, right_boundary, crossing_count
 
 
+def limit_mask_height(mask: np.ndarray, height_percent: float) -> np.ndarray:
+    if not 0.0 < height_percent <= 100.0:
+        raise ValueError(
+            "Road height percentage must be greater than 0 and at most 100."
+        )
+    last_row = int(mask.shape[0] * height_percent / 100.0)
+    limited_mask = np.zeros_like(mask, dtype=bool)
+    limited_mask[:last_row] = mask[:last_row]
+    return limited_mask
+
+
 def save_overlay(
     image_path: Path,
     road_mask: np.ndarray,
@@ -202,12 +315,16 @@ def process_file(
     input_path: Path, output_dir: Path, arguments: argparse.Namespace
 ) -> None:
     class_ids = load_class_ids(input_path)
-    road_mask = class_ids == arguments.road_index
-    if not np.any(road_mask):
+    road_mask = keep_largest_component(class_ids == arguments.road_index)
+    fitting_road_mask = limit_mask_height(road_mask, arguments.road_height_percent)
+    if not np.any(fitting_road_mask):
         raise ValueError(
-            f"No pixels for road class {arguments.road_index} were found in {input_path}."
+            f"No road pixels were found in the configured upper {arguments.road_height_percent}% "
+            f"of {input_path}."
         )
-    road_y_top, road_y_bottom, left_points, right_points = extract_boundaries(road_mask)
+    road_y_top, road_y_bottom, left_points, right_points = extract_boundaries(
+        fitting_road_mask
+    )
     left_curve = fit_polynomial(
         left_points,
         arguments.degree,
@@ -221,7 +338,7 @@ def process_file(
         arguments.fit_iterations,
     )
     region_mask, left_boundary, right_boundary, crossing_count = make_curved_region(
-        road_mask, left_points[:, 0].astype(int), left_curve, right_curve
+        fitting_road_mask, left_points[:, 0].astype(int), left_curve, right_curve
     )
     selected_masks, intersection_statistics = select_intersecting_classes(
         class_ids,
@@ -230,11 +347,17 @@ def process_file(
         arguments.intersection_threshold,
     )
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = output_dir / input_path.stem
+    image_output_dir = output_dir / input_path.stem
+    image_output_dir.mkdir(parents=True, exist_ok=True)
+    output_stem = image_output_dir / input_path.stem
+    output_road_mask = fitting_road_mask
+    output_selected_masks = {
+        class_id: limit_mask_height(class_mask, arguments.road_height_percent)
+        for class_id, class_mask in selected_masks.items()
+    }
     save_segmentation_mask(
-        road_mask,
-        selected_masks,
+        output_road_mask,
+        output_selected_masks,
         output_stem.with_name(f"{output_stem.name}_road_segmentation_mask.png"),
     )
     report = {
@@ -298,6 +421,12 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--image-extension", default=config.IMAGE_EXTENSION)
     parser.add_argument("--road-index", type=int, default=config.ROAD_INDEX)
+    parser.add_argument(
+        "--road-height-percent",
+        type=float,
+        default=config.ROAD_HEIGHT_PERCENT,
+        help="Percentage of image height retained from the top for fitting and obstacle detection.",
+    )
     parser.add_argument(
         "--intersection-threshold",
         type=float,
